@@ -15,7 +15,7 @@ return new class extends Migration
             $table->string('mobile_number')->unique();
             $table->date('dob')->nullable();
             $table->enum('gender', ['male', 'female', 'other'])->nullable();
-            $table->string('password');
+            $table->string('password')->nullable();
             $table->rememberToken();
             $table->timestamps();
         });
