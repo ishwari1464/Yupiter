@@ -6,83 +6,90 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use App\Models\Card;
+use App\Models\Otp;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\Rules\Password;
-
-
+use Illuminate\Support\Str;
+use Carbon\Carbon;
 
 class AuthController extends Controller
 {
-    public function register(Request $request)
-{
-    $request->validate([
-        'full_name' => 'required|string|max:255',
-        'email' => 'required|email|unique:users,email',
-        'mobile_number' => 'required|string|unique:users,mobile_number',
-        'dob' => 'required|date',
-        'gender' => 'required|in:male,female,other',
-        'password' => ['required', 'confirmed', Password::defaults()],
-    ]);
+    // 📌 Send OTP
+    public function sendOtp(Request $request)
+    {
+        $request->validate([
+            'mobile_number' => 'required|string|min:10|max:15',
+        ]);
 
-    $user = User::create([
-        'full_name' => $request->full_name,
-        'email' => $request->email,
-        'mobile_number' => $request->mobile_number,
-        'dob' => $request->dob,
-        'gender' => $request->gender,
-        'password' => Hash::make($request->password),
-    ]);
+        $otp = rand(100000, 999999);
 
-    // ✅ Generate unique 10-digit card number
-    do {
-        $card_number = mt_rand(1000000000, 9999999999);
-    } while (Card::where('card_number', $card_number)->exists());
+        Otp::create([
+            'mobile_number' => $request->mobile_number,
+            'otp' => $otp,
+            'expires_at' => Carbon::now()->addMinutes(5),
+        ]);
 
-    // Create Card with expiry date = 1 year from now
-    $card = Card::create([
-        'user_id' => $user->id,
-        'card_number' => $card_number,
-        'expiry_date' => now()->addYear(), // set 1 year validity
-    ]);
-
-    // Return expiry date in response
-    return response()->json([
-        'message' => 'User registered successfully',
-        'user' => $user,
-        'card_number' => $card->card_number,
-        'expiry_date' => $card->expiry_date->toDateString(),
-    ], 201);
-}
-
-public function login(Request $request)
-{
-    // 1️⃣ Validate the request
-    $request->validate([
-        'email' => 'required|email',
-        'password' => 'required|string',
-    ]);
-
-    // 2️⃣ Find user by email
-    $user = User::where('email', $request->email)->first();
-
-    // 3️⃣ Check password
-    if (!$user || !Hash::check($request->password, $user->password)) {
         return response()->json([
-            'message' => 'Invalid email or password'
-        ], 401);
+            'success' => true,
+            'message' => 'OTP sent successfully',
+            'otp' => $otp, // ⚠️ remove in production
+        ]);
     }
 
-    // 4️⃣ Generate a new API token
-    $token = bin2hex(random_bytes(30)); // 60-character token
-    $user->api_token = $token;
-    $user->save();
+    // 📌 Verify OTP (Login/Register)
+    public function verifyOtp(Request $request)
+    {
+        $request->validate([
+            'mobile_number' => 'required|string|min:10|max:15',
+            'otp' => 'required|string',
+        ]);
 
-    // 5️⃣ Return response
-    return response()->json([
-        'message' => 'Login successful',
-        'user' => $user,
-        'api_token' => $token,
-    ], 200);
-}
+        $otpRecord = Otp::where('mobile_number', $request->mobile_number)
+                        ->where('otp', $request->otp)
+                        ->where('expires_at', '>=', Carbon::now())
+                        ->latest()
+                        ->first();
 
+        if (!$otpRecord) {
+            return response()->json(['success' => false, 'message' => 'Invalid or expired OTP'], 401);
+        }
+
+        // Check if user exists or create new
+        $user = User::firstOrCreate(
+            ['mobile_number' => $request->mobile_number],
+            [
+                'full_name' => 'User'.rand(1000,9999),
+                'email' => 'otp'.rand(1000,9999).'@example.com', // dummy email
+                'dob' => '2000-01-01',
+                'gender' => 'other',
+                'password' => Hash::make(Str::random(8)), // not used
+            ]
+        );
+
+        // If new user, create Card
+        if (!$user->card) {
+            do {
+                $card_number = mt_rand(1000000000, 9999999999);
+            } while (Card::where('card_number', $card_number)->exists());
+
+            Card::create([
+                'user_id' => $user->id,
+                'card_number' => $card_number,
+                'expiry_date' => now()->addYear(),
+            ]);
+        }
+
+        // Generate token
+        $token = Str::random(60);
+        $user->api_token = $token;
+        $user->save();
+
+        $otpRecord->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Login successful',
+            'user' => $user,
+            'api_token' => $token,
+        ]);
+    }
 }
