@@ -1,119 +1,118 @@
 <?php
 
+
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
-use App\Models\Otp;
+use App\Models\Card;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Carbon\Carbon;
 
 class AuthController extends Controller
 {
-    // 📌 User Registration (NO password)
     public function register(Request $request)
     {
         $request->validate([
-            'full_name'     => 'required|string|max:255',
-            'email'         => 'required|email|unique:users,email',
-            'mobile_number' => 'required|string|min:10|max:15|unique:users,mobile_number',
-            'dob'           => 'required|date',
-            'gender'        => 'required|string|in:male,female,other',
+            'full_name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'mobile_number' => 'required|string|unique:users,mobile_number',
+            'dob' => 'required|date',
+            'gender' => 'required|in:male,female,other',
+            // Removed password validation
         ]);
 
         $user = User::create([
-            'full_name'     => $request->full_name,
-            'email'         => $request->email,
+            'full_name' => $request->full_name,
+            'email' => $request->email,
             'mobile_number' => $request->mobile_number,
-            'dob'           => $request->dob,
-            'gender'        => $request->gender,
-            'password'      => null, // 🚫 no password needed
+            'dob' => $request->dob,
+            'gender' => $request->gender,
+            // No password
         ]);
 
-        return response()->json([
-            'success' => true,
-            'message' => 'User registered successfully',
-            'user'    => $user,
+        // ✅ Generate unique 10-digit card number
+        do {
+            $card_number = mt_rand(1000000000, 9999999999);
+        } while (Card::where('card_number', $card_number)->exists());
+
+        // Create Card with expiry date = 1 year from now
+        $card = Card::create([
+            'user_id' => $user->id,
+            'card_number' => $card_number,
+            'expiry_date' => now()->addYear(), // set 1 year validity
         ]);
+
+        // Return expiry date in response
+        return response()->json([
+            'message' => 'User registered successfully',
+            'user' => $user,
+            'card_number' => $card->card_number,
+            'expiry_date' => $card->expiry_date->toDateString(),
+        ], 201);
     }
 
-    // 📌 Send OTP (only if user is registered)
-    public function sendOtp(Request $request)
+    // Step 1: Request OTP
+    public function requestOtp(Request $request)
     {
         $request->validate([
-            'mobile_number' => 'required|string|min:10|max:15',
+            'email' => 'required|email|exists:users,email',
         ]);
 
-        // Check if user exists
-        $user = User::where('mobile_number', $request->mobile_number)->first();
+        $user = User::where('email', $request->email)->first();
 
-        if (!$user) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Mobile number not registered. Please register first.',
-            ], 404);
-        }
-
+        // Generate 6-digit OTP
         $otp = rand(100000, 999999);
+        $user->otp_code = $otp;
+        $user->otp_expires_at = Carbon::now()->addMinutes(5);
+        $user->save();
 
-        Otp::create([
-            'mobile_number' => $request->mobile_number,
-            'otp' => $otp,
-            'expires_at' => Carbon::now()->addMinutes(5),
-        ]);
+        // Send OTP via email (or SMS)
+        // Mail::to($user->email)->send(new OtpMail($otp)); // Implement OtpMail if needed
 
+        // For demo, return OTP in response (remove in production)
         return response()->json([
-            'success' => true,
-            'message' => 'OTP sent successfully',
-            'otp' => $otp, // ⚠️ remove in production
+            'message' => 'OTP sent to your email',
+            'otp' => $otp, // Remove this in production!
         ]);
     }
 
-    // 📌 Verify OTP (Login)
+    // Step 2: Verify OTP and login
     public function verifyOtp(Request $request)
     {
         $request->validate([
-            'mobile_number' => 'required|string|min:10|max:15',
-            'otp' => 'required|string',
+            'email' => 'required|email|exists:users,email',
+            'otp' => 'required|digits:6',
         ]);
 
-        $otpRecord = Otp::where('mobile_number', $request->mobile_number)
-                        ->where('otp', $request->otp)
-                        ->where('expires_at', '>=', Carbon::now())
-                        ->latest()
-                        ->first();
+        $user = User::where('email', $request->email)->first();
 
-        if (!$otpRecord) {
+        if (
+            !$user ||
+            $user->otp_code != $request->otp ||
+            Carbon::now()->gt($user->otp_expires_at)
+        ) {
             return response()->json([
-                'success' => false,
-                'message' => 'Invalid or expired OTP',
+                'message' => 'Invalid or expired OTP'
             ], 401);
         }
 
-        // User must already exist
-        $user = User::where('mobile_number', $request->mobile_number)->first();
-
-        if (!$user) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Mobile number not registered. Please register first.',
-            ], 404);
-        }
+        // OTP is valid, clear OTP fields
+        $user->otp_code = null;
+        $user->otp_expires_at = null;
 
         // Generate API token
-        $token = Str::random(60);
+        $token = bin2hex(random_bytes(30));
         $user->api_token = $token;
         $user->save();
 
-        // delete OTP after successful login
-        $otpRecord->delete();
-
         return response()->json([
-            'success' => true,
             'message' => 'Login successful',
             'user' => $user,
             'api_token' => $token,
-        ]);
+        ], 200);
     }
 }
