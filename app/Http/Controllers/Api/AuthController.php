@@ -1,19 +1,17 @@
 <?php
 
-
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\User;
 use App\Models\Card;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Str;
+use App\Models\Otp;
 use Carbon\Carbon;
 
 class AuthController extends Controller
 {
+    // Registration
     public function register(Request $request)
     {
         $request->validate([
@@ -22,7 +20,6 @@ class AuthController extends Controller
             'mobile_number' => 'required|string|unique:users,mobile_number',
             'dob' => 'required|date',
             'gender' => 'required|in:male,female,other',
-            // Removed password validation
         ]);
 
         $user = User::create([
@@ -31,22 +28,19 @@ class AuthController extends Controller
             'mobile_number' => $request->mobile_number,
             'dob' => $request->dob,
             'gender' => $request->gender,
-            // No password
         ]);
 
-        // ✅ Generate unique 10-digit card number
+        // Generate unique 10-digit card number
         do {
             $card_number = mt_rand(1000000000, 9999999999);
         } while (Card::where('card_number', $card_number)->exists());
 
-        // Create Card with expiry date = 1 year from now
         $card = Card::create([
             'user_id' => $user->id,
             'card_number' => $card_number,
-            'expiry_date' => now()->addYear(), // set 1 year validity
+            'expiry_date' => now()->addYear(),
         ]);
 
-        // Return expiry date in response
         return response()->json([
             'message' => 'User registered successfully',
             'user' => $user,
@@ -55,28 +49,26 @@ class AuthController extends Controller
         ], 201);
     }
 
-    // Step 1: Request OTP
-    public function requestOtp(Request $request)
+    // Step 1: Send OTP (temporary, via mobile number)
+    public function sendOtp(Request $request)
     {
         $request->validate([
-            'email' => 'required|email|exists:users,email',
+            'mobile_number' => 'required|string',
         ]);
 
-        $user = User::where('email', $request->email)->first();
-
-        // Generate 6-digit OTP
         $otp = rand(100000, 999999);
-        $user->otp_code = $otp;
-        $user->otp_expires_at = Carbon::now()->addMinutes(5);
-        $user->save();
+        $expires_at = Carbon::now()->addMinutes(5);
 
-        // Send OTP via email (or SMS)
-        // Mail::to($user->email)->send(new OtpMail($otp)); // Implement OtpMail if needed
+        // Save OTP in otps table (temporary)
+        Otp::updateOrCreate(
+            ['mobile_number' => $request->mobile_number],
+            ['otp' => $otp, 'expires_at' => $expires_at]
+        );
 
-        // For demo, return OTP in response (remove in production)
+        // Return OTP in response for testing
         return response()->json([
-            'message' => 'OTP sent to your email',
-            'otp' => $otp, // Remove this in production!
+            'message' => 'OTP generated',
+            'otp' => $otp,
         ]);
     }
 
@@ -84,25 +76,28 @@ class AuthController extends Controller
     public function verifyOtp(Request $request)
     {
         $request->validate([
-            'email' => 'required|email|exists:users,email',
+            'mobile_number' => 'required|string',
             'otp' => 'required|digits:6',
         ]);
 
-        $user = User::where('email', $request->email)->first();
+        $otpData = Otp::where('mobile_number', $request->mobile_number)
+                      ->where('otp', $request->otp)
+                      ->first();
 
-        if (
-            !$user ||
-            $user->otp_code != $request->otp ||
-            Carbon::now()->gt($user->otp_expires_at)
-        ) {
+        if (!$otpData || Carbon::now()->gt($otpData->expires_at)) {
             return response()->json([
                 'message' => 'Invalid or expired OTP'
             ], 401);
         }
 
-        // OTP is valid, clear OTP fields
-        $user->otp_code = null;
-        $user->otp_expires_at = null;
+        // OTP valid → delete it
+        $otpData->delete();
+
+        // Get or create user by mobile number
+        $user = User::firstOrCreate(
+            ['mobile_number' => $request->mobile_number],
+            ['full_name' => 'Test User', 'email' => $request->mobile_number.'@test.com']
+        );
 
         // Generate API token
         $token = bin2hex(random_bytes(30));
@@ -113,6 +108,6 @@ class AuthController extends Controller
             'message' => 'Login successful',
             'user' => $user,
             'api_token' => $token,
-        ], 200);
+        ]);
     }
 }
